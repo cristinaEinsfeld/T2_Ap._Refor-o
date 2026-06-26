@@ -1,25 +1,3 @@
-#!/usr/bin/env python3
-"""
-==============================================================================
-Trabalho 2 (T2) - Aprendizado por Reforço - PUCRS
-Desenvolvimento de um Agente Inteligente com Deep Reinforcement Learning
-==============================================================================
-
-Agente DQN / Double DQN para o ambiente CartPole-v1 (Gymnasium).
-
-Artigos de referência (Qualis A1-B1, pós-2021):
-  [1] Zhang et al., "On the Convergence and Sample Complexity Analysis of
-      Deep Q-Networks with epsilon-Greedy Exploration", NeurIPS 2023.
-  [2] Wang et al., "Deep Reinforcement Learning: A Survey",
-      IEEE Trans. Neural Netw. Learn. Syst., vol. 35, no. 4, Abr. 2024.
-  [3] Osei & Lopez, "Experience Replay Optimisation via ATSC and TSC for
-      Performance Stability in Deep RL", Appl. Sci. 2023, 13, 2034.
-
-Autora: Cristina Einsfeld
-Data  : Junho 2026
-==============================================================================
-"""
-
 import random
 import os
 from collections import deque, namedtuple
@@ -42,23 +20,6 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-# ---------------------------------------------------------------------------
-# Hiperparâmetros  (centralizados em dicionário para fácil ajuste)
-# ---------------------------------------------------------------------------
-# A taxa de aprendizado (lr) e o fator de desconto (gamma) são escolhidos com
-# base na análise de convergência de Zhang et al. [1], Teorema 1: a taxa de
-# convergência dos pesos W^{(t,0)} para W* é limitada superiormente por
-# (gamma + c_eps * (1 - gamma)), onde gamma próximo de 1 enfatiza recompensas
-# de longo prazo, porém exige mais iterações para convergir (Remark 4, [1]).
-# Para o CartPole, gamma=0.99 equilibra horizonte longo e velocidade de
-# convergência.
-#
-# O tamanho do buffer (buffer_size) segue a recomendação prática de
-# Wang et al. [2] (Seção III-A, item 2): experience replay quebra a
-# correlação temporal das amostras, e um buffer grande (>= 50 k) garante
-# diversidade suficiente para estabilizar o gradiente.  Osei & Lopez [3]
-# (Seção 5, Figuras 5-6) demonstram que buffers maiores produzem desempenho
-# mais estável e com menor variância.
 HYPERPARAMS = {
     "env_name":           "CartPole-v1",
     "num_episodes":       1200,
@@ -94,25 +55,6 @@ Transition = namedtuple("Transition",
 # 1. REDE NEURAL PROFUNDA – QNetwork (MLP)
 # ============================================================================
 class QNetwork(nn.Module):
-    """Aproximador da função Q usando uma MLP (Multi-Layer Perceptron).
-
-    Fundamentação teórica ([2] Seção III-A, item 1):
-        Wang et al. descrevem que o DQN utiliza uma rede neural profunda para
-        extrair features de baixo nível e aproximar a função ação-valor Q(s,a)
-        sem conhecimento de domínio adicional.  Hornik et al. (1989), citado
-        em [2] Seção II-B, provam que MLPs multicamada são aproximadores
-        universais de funções, justificando seu uso para representar Q*.
-
-    A arquitetura segue a MLP com ReLU, conforme a Equação (4) de [1]:
-        H(W; x) = 1^T / K * phi(W_L^T ... phi(W_1^T x))
-    onde phi(.) = max{0, .} (ReLU).
-
-    Argumentos:
-        state_dim:    dimensão do espaço de estados (4 para CartPole).
-        action_dim:   número de ações discretas (2 para CartPole).
-        hidden_sizes: tupla com número de neurônios por camada oculta.
-    """
-
     def __init__(self, state_dim: int, action_dim: int,
                  hidden_sizes: tuple = (128, 128)):
         super().__init__()
@@ -134,27 +76,6 @@ class QNetwork(nn.Module):
 # 2. REPLAY BUFFER (Buffer de Experiência)
 # ============================================================================
 class ReplayBuffer:
-    """Buffer circular de experiência para treinamento off-policy.
-
-    Fundamentação teórica ([2] Seção III-A, item 2; [3] Seções 2.1-2.2):
-        Wang et al. [2] explicam que trajetórias consecutivas possuem
-        correlação temporal; alimentar diretamente a rede com esses dados
-        causa divergência entre valor estimado e esperado.  O experience
-        replay armazena transições históricas e amostra uniformemente
-        mini-batches aleatórios, quebrando a correlação e melhorando a
-        eficiência de dados (treinamento off-policy).
-
-        Osei & Lopez [3] (Seção 2.1) detalham a estratégia de retenção
-        FIFO (First-In-First-Out), onde transições antigas são sobrescritas
-        pelas novas quando o buffer está cheio.  Embora simples, esta
-        abordagem é eficaz quando combinada com um buffer suficientemente
-        grande (>= 50 k transições, cf. [3] Seção 5).
-
-    Argumentos:
-        capacity:   tamanho máximo do buffer (deque).
-        batch_size: tamanho do mini-batch amostrado.
-    """
-
     def __init__(self, capacity: int, batch_size: int):
         self.memory = deque(maxlen=capacity)
         self.batch_size = batch_size
@@ -186,38 +107,6 @@ class ReplayBuffer:
 # 3. AGENTE DQN / DOUBLE DQN
 # ============================================================================
 class DQNAgent:
-    """Agente Deep Q-Network com suporte a Double DQN.
-
-    Fundamentação teórica:
-        * DQN padrão – [2] Seção III-A, Eq. (12)-(13): utiliza target network
-          para estabilizar o treinamento.  O valor alvo é:
-              y = R + gamma * max_a Q^-(s', a; theta^-)
-          onde Q^- é a target network com parâmetros theta^- atualizados
-          periodicamente.
-
-        * Double DQN – [2] Seção III-B, Eq. (14): desacopla seleção e
-          avaliação da ação para mitigar superestimação dos Q-valores:
-              y = R + gamma * Q^-(s', argmax_a Q(s', a; theta); theta^-)
-          A rede local (theta) seleciona a melhor ação; a target (theta^-)
-          avalia o valor dessa ação.  Van Hasselt et al. (2016) provaram que
-          qualquer fonte de erro leva à superestimação no Q-learning padrão,
-          e o DDQN corrige esse viés ([2] Seção III-B).
-
-        * Política epsilon-greedy com decaimento – [1] Seção 4.1 (T1):
-          Zhang et al. provam que epsilon deve decrescer ao longo das
-          iterações para garantir convergência.  Um epsilon alto no início
-          amplia a região de convergência (relaxa requisitos de W^{(0,0)}),
-          enquanto um epsilon baixo acelera a taxa de convergência
-          (Remark 5, [1]).  O decaimento geométrico epsilon_{t+1} =
-          epsilon_t * decay implementa essa ideia diretamente (cf. Eq. 17
-          e Remark 2 de [1]).
-
-    Argumentos:
-        state_dim:  dimensão do espaço de estados.
-        action_dim: número de ações discretas.
-        hp:         dicionário de hiperparâmetros.
-    """
-
     def __init__(self, state_dim: int, action_dim: int, hp: dict):
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -260,18 +149,6 @@ class DQNAgent:
     # Seleção de ação: epsilon-greedy com decaimento
     # -----------------------------------------------------------------
     def select_action(self, state: np.ndarray) -> int:
-        """Seleciona ação via política epsilon-greedy.
-
-        Com probabilidade epsilon o agente explora (ação aleatória);
-        com probabilidade (1 - epsilon) ele explota (argmax Q).
-
-        Fundamentação ([1] Seção 3.1, Algoritmo 1, linha 6):
-            "at state s_n, with probability epsilon_t, select a random
-             action a_n, otherwise select a_n = argmax_a Q(W^{(t,0)}; s_n, a)."
-
-        O decaimento é aplicado externamente após cada episódio (ver
-        método decay_epsilon).
-        """
         if random.random() < self.epsilon:
             return random.randrange(self.action_dim)
 
@@ -284,12 +161,6 @@ class DQNAgent:
     # Armazena transição e dispara aprendizado
     # -----------------------------------------------------------------
     def step(self, state, action, reward, next_state, done):
-        """Salva transição no buffer e aprende a cada learn_every passos.
-
-        Aprender a cada N passos (em vez de todo passo) reduz o número de
-        atualizações de gradiente por experiência coletada, diminuindo o
-        risco de overfitting e melhorando a estabilidade do treinamento.
-        """
         self.buffer.push(state, action, reward, next_state, done)
         self.steps_done += 1
 
@@ -303,20 +174,6 @@ class DQNAgent:
     # Aprendizado (cálculo do Loss e retropropagação)
     # -----------------------------------------------------------------
     def learn(self) -> float:
-        """Executa um passo de otimização sobre um mini-batch.
-
-        Calcula a perda entre Q(s,a) estimado e o valor alvo y.
-
-        Se use_double_dqn == False (DQN padrão, [2] Eq. 13):
-            y = r + gamma * max_a' Q^-(s', a'; theta^-)
-
-        Se use_double_dqn == True  (DDQN, [2] Eq. 14):
-            a* = argmax_a' Q(s', a'; theta)        <-- rede local seleciona
-            y  = r + gamma * Q^-(s', a*; theta^-)   <-- target avalia
-
-        Retorna:
-            Valor escalar da perda para registro de métricas.
-        """
         states, actions, rewards, next_states, dones = self.buffer.sample()
 
         states_t = torch.FloatTensor(states).to(self.device)
@@ -362,19 +219,6 @@ class DQNAgent:
     # Atualização da Target Network
     # -----------------------------------------------------------------
     def update_target_network(self):
-        """Atualiza a target network.
-
-        Fundamentação ([2] Seção III-A, item 3):
-            "Every time the training completes a certain number of steps,
-             the main network's parameters are synchronized to the target
-             network."  Isso mantém o valor alvo estável por um período,
-             melhorando a estabilidade do DQN.
-
-        Dois modos disponíveis:
-          * Hard update: theta^- <- theta  (cópia integral periódica)
-          * Soft update (Polyak): theta^- <- tau*theta + (1-tau)*theta^-
-            conforme [2] Seção IV-C, Eq. (28), originalmente do DDPG.
-        """
         if self.hp["use_soft_update"]:
             tau = self.hp["tau"]
             for tp, lp in zip(self.target_network.parameters(),
@@ -389,18 +233,6 @@ class DQNAgent:
     # Decaimento do epsilon
     # -----------------------------------------------------------------
     def decay_epsilon(self):
-        """Decaimento geométrico de epsilon: eps_{t+1} = eps_t * decay.
-
-        Fundamentação ([1] Corolário 1, Remark 2):
-            Zhang et al. provam que epsilon precisa diminuir conforme a
-            distância e_t = ||W^{(t,0)} - W*|| decresce.  Um epsilon alto
-            no início amplia a região de convergência (Eq. 18, [1]) mas
-            desacelera a taxa; um epsilon baixo acelera a convergência
-            (Eq. 19: taxa ~ gamma + c_eps*(1-gamma)).  O decaimento
-            geométrico é a realização prática mais simples desta prescrição
-            teórica (cf. Seção 5 de [1], onde eps_t decresce geometricamente
-            de 1 a 0.01 nos experimentos com Atari Pong).
-        """
         self.epsilon = max(
             self.hp["epsilon_min"],
             self.epsilon * self.hp["epsilon_decay"]
@@ -411,25 +243,6 @@ class DQNAgent:
 # 4. LOOP DE TREINAMENTO
 # ============================================================================
 def train(hp: dict):
-    """Treina o agente DQN/DDQN no ambiente especificado.
-
-    Monitora recompensa acumulada, perda média e epsilon por episódio.
-    Para quando atinge a meta de média móvel >= solve_threshold nos
-    últimos 100 episódios ou quando esgota num_episodes.
-
-    Fundamentação geral:
-        O loop segue o Algoritmo 1 de [1] e o Algorithm 1 de [2]:
-        para cada episódio (loop externo), o agente interage com o ambiente
-        seguindo a política epsilon-greedy, armazena transições no replay
-        buffer e, a cada passo, amostra um mini-batch para atualizar os
-        pesos via gradiente descendente.
-
-    Argumentos:
-        hp: dicionário de hiperparâmetros.
-
-    Retorna:
-        Tupla (agent, scores, losses, epsilons).
-    """
     env = gym.make(hp["env_name"])
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n
@@ -521,15 +334,6 @@ def train(hp: dict):
 # 5. GERAÇÃO DE GRÁFICOS
 # ============================================================================
 def plot_results(scores, losses, epsilons, hp):
-    """Gera e salva três gráficos de evolução do treinamento.
-
-    Fundamentação:
-        A análise visual da curva de aprendizado é fundamental para validar
-        que o agente de fato converge para Q* ([1] Seção 5, Figuras 1-3).
-        Zhang et al. usam gráficos de test error vs. 1/sqrt(N), taxa de
-        convergência vs. c_eps e test score vs. episódios para demonstrar
-        alinhamento entre teoria e prática.
-    """
     window = 100
     fig, axes = plt.subplots(3, 1, figsize=(10, 14))
     mode_label = "Double DQN" if hp["use_double_dqn"] else "DQN"
@@ -597,13 +401,6 @@ def plot_results(scores, losses, epsilons, hp):
 # 6. AVALIAÇÃO VISUAL (renderização do agente treinado)
 # ============================================================================
 def evaluate_visual(model_path: str, hp: dict, num_episodes: int = 3):
-    """Carrega modelo salvo e renderiza o agente jogando CartPole.
-
-    Argumentos:
-        model_path:   caminho para o arquivo .pth com os pesos.
-        hp:           dicionário de hiperparâmetros (para reconstruir a rede).
-        num_episodes: número de episódios para renderizar.
-    """
     env = gym.make(hp["env_name"], render_mode="human")
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n
